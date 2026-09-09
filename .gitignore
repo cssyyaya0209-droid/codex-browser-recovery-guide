@@ -1,0 +1,5 @@
+# Local configuration and runtime evidence are never part of the reference package.
+proxy.txt
+logs/
+*.lnk
+*.pdb

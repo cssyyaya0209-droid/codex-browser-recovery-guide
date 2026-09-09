@@ -40,18 +40,32 @@ internal static class NodeReplProxyLauncher {
         }
         b.Append('\\', slashes * 2); return b.Append('"').ToString();
     }
+    static string ReadProxy() {
+        string config = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "proxy.txt");
+        if (!File.Exists(config)) throw new InvalidOperationException("Create proxy.txt from proxy.example.txt and enter your local HTTP proxy URL.");
+        string value = File.ReadAllText(config).Trim();
+        Uri uri;
+        if (String.IsNullOrEmpty(value) || value.IndexOfAny(new char[] {'\r', '\n', ' ', '\t'}) >= 0 ||
+            !Uri.TryCreate(value, UriKind.Absolute, out uri) || uri.Scheme != "http" || !uri.IsLoopback ||
+            !String.IsNullOrEmpty(uri.UserInfo) || uri.AbsolutePath != "/" ||
+            !String.IsNullOrEmpty(uri.Query) || !String.IsNullOrEmpty(uri.Fragment) || uri.Port < 1)
+            throw new InvalidOperationException("proxy.txt must contain one local HTTP proxy URL with a valid port, without credentials or a path.");
+        return value;
+    }
     static int Main(string[] args) {
         IntPtr job = IntPtr.Zero; ProcessInfo child = new ProcessInfo();
         try {
             if (!Environment.Is64BitProcess) throw new InvalidOperationException("64-bit Windows is required.");
+            string proxy = ReadProxy();
+            if (args.Length == 1 && args[0] == "--check-config") { Console.WriteLine(proxy); return 0; }
             string node = Environment.GetEnvironmentVariable("NODE_REPL_NODE_PATH");
             if (String.IsNullOrEmpty(node)) throw new InvalidOperationException("NODE_REPL_NODE_PATH is missing.");
             string real = Path.GetFullPath(Path.Combine(Path.GetDirectoryName(node), "node_repl.exe"));
             string expected = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "OpenAI", "Codex", "runtimes", "cua_node") + Path.DirectorySeparatorChar;
             if (!real.StartsWith(expected, StringComparison.OrdinalIgnoreCase) || !File.Exists(real))
                 throw new InvalidOperationException("Original bundled node_repl.exe was not found in the expected runtime.");
-            Environment.SetEnvironmentVariable("HTTP_PROXY", "http://127.0.0.1:56666");
-            Environment.SetEnvironmentVariable("HTTPS_PROXY", "http://127.0.0.1:56666");
+            Environment.SetEnvironmentVariable("HTTP_PROXY", proxy);
+            Environment.SetEnvironmentVariable("HTTPS_PROXY", proxy);
             StartupInfo si = new StartupInfo(); si.cb = Marshal.SizeOf(si); si.flags = 0x100;
             si.stdin = GetStdHandle(-10); si.stdout = GetStdHandle(-11); si.stderr = GetStdHandle(-12);
             foreach (IntPtr handle in new IntPtr[] { si.stdin, si.stdout, si.stderr })
@@ -70,9 +84,14 @@ internal static class NodeReplProxyLauncher {
                 Environment.CurrentDirectory, ref si, out child)) throw new Win32Exception();
             if (!AssignProcessToJobObject(job, child.process)) { TerminateProcess(child.process, 1); throw new Win32Exception(); }
             if (ResumeThread(child.thread) == UInt32.MaxValue) throw new Win32Exception();
-            string log = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "proxy-runtime-" + Process.GetCurrentProcess().Id + ".txt");
-            File.WriteAllText(log, "utc=" + DateTime.UtcNow.ToString("o") + "\nchildPid=" + child.pid +
-                "\nrealExecutable=" + real + "\nproxy=http://127.0.0.1:56666\n");
+            // Diagnostics must not fail an otherwise valid MCP launch.
+            try {
+                string logDir = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "logs");
+                Directory.CreateDirectory(logDir);
+                string log = Path.Combine(logDir, "proxy-runtime-" + Process.GetCurrentProcess().Id + ".txt");
+                File.WriteAllText(log, "utc=" + DateTime.UtcNow.ToString("o") + "\nchildPid=" + child.pid +
+                    "\nproxyConfigured=true\n");
+            } catch { /* local logs are best-effort; never write diagnostics to MCP stdout */ }
             WaitForSingleObject(child.process, UInt32.MaxValue);
             uint exitCode; if (!GetExitCodeProcess(child.process, out exitCode)) throw new Win32Exception();
             return unchecked((int)exitCode);
